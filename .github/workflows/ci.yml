@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  action:
+    # Runs the composite action from this checkout against the in-repo fake server.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start fake MCP server
+        run: |
+          go build -o "$RUNNER_TEMP/fakeserver" ./internal/mcptest/fakeserver
+          "$RUNNER_TEMP/fakeserver" --sse > "$RUNNER_TEMP/url" &
+          for _ in $(seq 50); do [[ -s "$RUNNER_TEMP/url" ]] && break; sleep 0.1; done
+          echo "MCP_URL=$(cat "$RUNNER_TEMP/url")" >> "$GITHUB_ENV"
+      - uses: ./
+        with:
+          url: ${{ env.MCP_URL }}
+          concurrency: "3"
+          duration: 5s
+          tool: echo
+          profile: alexa
+          slo: |
+            p95<500ms
+            errors<1%

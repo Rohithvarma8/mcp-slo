@@ -1,0 +1,111 @@
+name: mcp-slo
+description: Reliability-test a Streamable HTTP MCP server against latency and error-rate SLOs.
+author: Rohithvarma8
+branding:
+  icon: activity
+  color: green
+
+inputs:
+  url:
+    description: Streamable HTTP MCP endpoint.
+    required: true
+  concurrency:
+    description: Concurrent workers.
+    default: "5"
+  duration:
+    description: Steady-state load duration (Go duration, e.g. 30s).
+    default: "30s"
+  rate:
+    description: Max requests per second across all workers (0 = unlimited).
+    default: "0"
+  tool:
+    description: Tool to call in each iteration. tools/call is skipped if empty.
+    default: ""
+  args:
+    description: JSON object of arguments for the tool.
+    default: "{}"
+  slo:
+    description: SLOs, one per line (e.g. p95<500ms, errors<1%, tools/call:p99<1s).
+    default: ""
+  profile:
+    description: Client profile with extra checks (alexa).
+    default: ""
+  cold-wait:
+    description: Idle this long before measuring a cold first session (e.g. 10m). Empty to skip.
+    default: ""
+  headers:
+    description: "Extra request headers, one 'Name: value' per line. Use secrets for tokens."
+    default: ""
+  artifact-name:
+    description: Name of the uploaded report artifact.
+    default: mcp-slo-report
+  go-version:
+    description: Go version used to build mcp-slo.
+    default: stable
+
+outputs:
+  report:
+    description: Path to the JSON report.
+    value: ${{ steps.run.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache: false
+
+    - name: Install mcp-slo
+      shell: bash
+      env:
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        if [[ -n "$ACTION_REF" ]]; then
+          go install "github.com/Rohithvarma8/mcp-slo@${ACTION_REF}"
+        else
+          # Local `uses: ./` has no ref: build the checked-out copy.
+          (cd "$ACTION_PATH" && go install .)
+        fi
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+    - name: Run mcp-slo
+      id: run
+      shell: bash
+      env:
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_CONCURRENCY: ${{ inputs.concurrency }}
+        INPUT_DURATION: ${{ inputs.duration }}
+        INPUT_RATE: ${{ inputs.rate }}
+        INPUT_TOOL: ${{ inputs.tool }}
+        INPUT_ARGS: ${{ inputs.args }}
+        INPUT_SLO: ${{ inputs.slo }}
+        INPUT_PROFILE: ${{ inputs.profile }}
+        INPUT_COLD_WAIT: ${{ inputs.cold-wait }}
+        INPUT_HEADERS: ${{ inputs.headers }}
+      run: |
+        out="$RUNNER_TEMP/mcp-slo"
+        mkdir -p "$out"
+        echo "report=$out/report.json" >> "$GITHUB_OUTPUT"
+        args=(run --url "$INPUT_URL" --concurrency "$INPUT_CONCURRENCY" --duration "$INPUT_DURATION"
+              --rate "$INPUT_RATE" --json "$out/report.json" --junit "$out/junit.xml")
+        if [[ -n "$INPUT_TOOL" ]]; then args+=(--tool "$INPUT_TOOL" --args "$INPUT_ARGS"); fi
+        if [[ -n "$INPUT_PROFILE" ]]; then args+=(--profile "$INPUT_PROFILE"); fi
+        if [[ -n "$INPUT_COLD_WAIT" ]]; then args+=(--cold-wait "$INPUT_COLD_WAIT"); fi
+        while IFS= read -r line; do
+          line="$(echo "$line" | xargs)"
+          if [[ -n "$line" ]]; then args+=(--slo "$line"); fi
+        done <<< "$INPUT_SLO"
+        while IFS= read -r line; do
+          if [[ -n "${line// }" ]]; then args+=(--header "$line"); fi
+        done <<< "$INPUT_HEADERS"
+        mcp-slo "${args[@]}"
+
+    - name: Upload report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/mcp-slo/
+        if-no-files-found: ignore
